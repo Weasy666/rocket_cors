@@ -3,7 +3,7 @@
 #[allow(unused_imports)]
 use ::log::{error, info};
 use rocket::http::{self, uri::Origin, Status};
-use rocket::{self, error_, info_, outcome::Outcome, Request};
+use rocket::{self, outcome::Outcome, trace::{error as error_, info as info_}, Request};
 
 use crate::{
     actual_request_response, origin, preflight_response, request_headers, validate, Cors, Error,
@@ -30,7 +30,7 @@ impl rocket::route::Handler for FairingErrorRoute {
             .param::<u16>(0)
             .unwrap_or(Ok(0))
             .unwrap_or_else(|e| {
-                error_!("Fairing Error Handling Route error: {:?}", e);
+                error!("Fairing Error Handling Route error: {:?}", e);
                 500
             });
         let status = Status::from_code(status).unwrap_or(Status::InternalServerError);
@@ -89,7 +89,7 @@ fn on_response_wrapper(
     // requests where an actual route exist?
     if request.method() == http::Method::Options && request.route().is_none() {
         info_!(
-            "CORS Fairing: Turned missing route {} into an OPTIONS pre-flight request",
+            "CORS Fairing: Turned missing route {:?} into an OPTIONS pre-flight request",
             request
         );
         response.set_status(Status::NoContent);
@@ -197,7 +197,7 @@ mod tests {
         let expected_uri = format!("{}/<status>", CORS_ROOT);
         let error_route = rocket
             .routes()
-            .find(|r| r.method == Method::Get && r.uri.to_string() == expected_uri);
+            .find(|r| r.method == Some(Method::Get) && r.uri.to_string() == expected_uri);
         assert!(error_route.is_some());
     }
 

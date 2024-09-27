@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use rocket::http::Status;
+use rocket::http::{Method, Status};
 use rocket::request::{self, FromRequest};
 use rocket::{self, outcome::Outcome};
 #[cfg(feature = "serialization")]
@@ -149,7 +149,7 @@ impl<'r> FromRequest<'r> for Origin {
 /// You can use this as a rocket [Request Guard](https://rocket.rs/guide/requests/#request-guards)
 /// to ensure that the header is passed in correctly.
 #[derive(Debug)]
-pub struct AccessControlRequestMethod(pub crate::Method);
+pub struct AccessControlRequestMethod(pub Method);
 
 impl AccessControlRequestMethod {
     /// Derives an instance of `Self` from the incoming request metadata.
@@ -172,10 +172,10 @@ impl AccessControlRequestMethod {
 }
 
 impl FromStr for AccessControlRequestMethod {
-    type Err = ();
+    type Err = crate::Error;
 
     fn from_str(method: &str) -> Result<Self, Self::Err> {
-        Ok(AccessControlRequestMethod(crate::Method::from_str(method)?))
+        Ok(AccessControlRequestMethod(Method::from_str(method).map_err(|e| Into::<Box<dyn std::error::Error>>::into(e))?))
     }
 }
 
@@ -252,15 +252,13 @@ impl<'r> FromRequest<'r> for AccessControlRequestHeaders {
 mod tests {
     use std::str::FromStr;
 
-    use rocket::http::hyper;
-    use rocket::http::Header;
+    //use rocket::http::hyper;
+    use rocket::http::{Header, Method};
     use rocket::local::blocking::Client;
 
-    static ORIGIN: http::header::HeaderName = hyper::header::ORIGIN;
-    static ACCESS_CONTROL_REQUEST_METHOD: http::header::HeaderName =
-        hyper::header::ACCESS_CONTROL_REQUEST_METHOD;
-    static ACCESS_CONTROL_REQUEST_HEADERS: http::header::HeaderName =
-        hyper::header::ACCESS_CONTROL_REQUEST_HEADERS;
+    static ORIGIN: &str = "ORIGIN";
+    static ACCESS_CONTROL_REQUEST_METHOD: &str = "Access-Control-Request-Method";
+    static ACCESS_CONTROL_REQUEST_HEADERS: &str = "Access-Control-Request-Headers";
 
     use super::*;
 
@@ -330,7 +328,7 @@ mod tests {
         let client = make_client();
         let mut request = client.get("/");
 
-        let origin = Header::new(ORIGIN.as_str(), "https://www.example.com");
+        let origin = Header::new(ORIGIN, "https://www.example.com");
         request.add_header(origin);
 
         let outcome = Origin::from_request_sync(request.inner());
@@ -347,18 +345,18 @@ mod tests {
         let parsed_method = not_err!(AccessControlRequestMethod::from_str(method));
         assert_matches!(
             parsed_method,
-            AccessControlRequestMethod(crate::Method(rocket::http::Method::Post))
+            AccessControlRequestMethod(Method::Post)
         );
 
         let method = "options";
         let parsed_method = not_err!(AccessControlRequestMethod::from_str(method));
         assert_matches!(
             parsed_method,
-            AccessControlRequestMethod(crate::Method(rocket::http::Method::Options))
+            AccessControlRequestMethod(Method::Options)
         );
 
         let method = "INVALID";
-        is_err!(AccessControlRequestMethod::from_str(method));
+        let _ = is_err!(AccessControlRequestMethod::from_str(method));
     }
 
     #[test]
@@ -366,8 +364,8 @@ mod tests {
         let client = make_client();
         let mut request = client.get("/");
         let method = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            "GET",
         );
         request.add_header(method);
         let outcome = AccessControlRequestMethod::from_request_sync(request.inner());
@@ -392,7 +390,7 @@ mod tests {
         let client = make_client();
         let mut request = client.get("/");
         let headers = Header::new(
-            ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
+            ACCESS_CONTROL_REQUEST_HEADERS,
             "accept-language, date",
         );
         request.add_header(headers);

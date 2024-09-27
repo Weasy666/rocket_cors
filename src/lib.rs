@@ -266,15 +266,14 @@ use std::error;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::str::FromStr;
 
 #[allow(unused_imports)]
 use ::log::{debug, error, info};
 use regex::RegexSet;
-use rocket::http::{self, Status};
+use rocket::http::{self, Method, Status};
 use rocket::request::{FromRequest, Request};
 use rocket::response;
-use rocket::{debug_, error_, info_, outcome::Outcome, State};
+use rocket::{trace::{debug as debug_, error as error_, info as info_}, outcome::Outcome, State};
 #[cfg(feature = "serialization")]
 use serde_derive::{Deserialize, Serialize};
 
@@ -323,6 +322,8 @@ pub enum Error {
     /// The `on_response` handler of Fairing could not find the injected header from the Request.
     /// Either some other fairing has removed it, or this is a bug.
     MissingInjectedHeader,
+    /// Some unknown error occured
+    Unknown(Box<dyn std::error::Error>)
 }
 
 impl Error {
@@ -393,6 +394,7 @@ impl fmt::Display for Error {
                 origins.join("; ")
             ),
             Error::RegexError(ref e) => write!(f, "{}", e),
+            Error::Unknown(e) => write!(f, "{}", e),
         }
     }
 }
@@ -416,6 +418,12 @@ impl<'r, 'o: 'r> response::Responder<'r, 'o> for Error {
 impl From<url::ParseError> for Error {
     fn from(error: url::ParseError) -> Self {
         Error::BadOrigin(error)
+    }
+}
+
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(error: Box<dyn std::error::Error>) -> Self {
+        Error::Unknown(error)
     }
 }
 
@@ -464,88 +472,6 @@ impl<T> AllOrSome<T> {
         match self {
             AllOrSome::All => panic!("Attempting to unwrap an `All`"),
             AllOrSome::Some(inner) => inner,
-        }
-    }
-}
-
-/// A wrapper type around `rocket::http::Method` to support serialization and deserialization
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Method(http::Method);
-
-impl FromStr for Method {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let method = http::Method::from_str(s)?;
-        Ok(Method(method))
-    }
-}
-
-impl Deref for Method {
-    type Target = http::Method;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<http::Method> for Method {
-    fn from(method: http::Method) -> Self {
-        Method(method)
-    }
-}
-
-impl fmt::Display for Method {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-#[cfg(feature = "serialization")]
-mod method_serde {
-    use std::fmt;
-    use std::str::FromStr;
-
-    use serde::{self, Deserialize, Serialize};
-
-    use crate::Method;
-
-    impl Serialize for Method {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            serializer.serialize_str(self.as_str())
-        }
-    }
-
-    impl<'de> Deserialize<'de> for Method {
-        fn deserialize<D>(deserializer: D) -> Result<Method, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            use serde::de::{self, Visitor};
-
-            struct MethodVisitor;
-            impl<'de> Visitor<'de> for MethodVisitor {
-                type Value = Method;
-
-                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    formatter.write_str("a string containing a HTTP Verb")
-                }
-
-                fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
-                where
-                    E: de::Error,
-                {
-                    match Self::Value::from_str(s) {
-                        Ok(value) => Ok(value),
-                        Err(e) => Err(de::Error::custom(format!("{:?}", e))),
-                    }
-                }
-            }
-
-            deserializer.deserialize_string(MethodVisitor)
         }
     }
 }
@@ -869,7 +795,7 @@ impl ParsedAllowedOrigins {
 /// use std::str::FromStr;
 /// use rocket_cors::AllowedMethods;
 ///
-/// let allowed_methods: AllowedMethods = ["Get", "Post", "Delete"]
+/// let allowed_methods: AllowedMethods = ["GET", "POST", "DELETE"]
 ///    .iter()
 ///    .map(|s| FromStr::from_str(s).unwrap())
 ///    .collect();
@@ -1099,8 +1025,6 @@ impl Default for CorsOptions {
 
 impl CorsOptions {
     fn default_allowed_methods() -> HashSet<Method> {
-        use rocket::http::Method;
-
         vec![
             Method::Get,
             Method::Head,
@@ -2002,7 +1926,7 @@ impl rocket::route::Handler for CatchAllOptionsRouteHandler {
         };
 
         info_!(
-            "\"Catch all\" handling of CORS `OPTIONS` preflight for request {}",
+            "\"Catch all\" handling of CORS `OPTIONS` preflight for request {:?}",
             request
         );
 
@@ -2014,18 +1938,15 @@ impl rocket::route::Handler for CatchAllOptionsRouteHandler {
 mod tests {
     use std::str::FromStr;
 
-    use rocket::http::hyper;
     use rocket::http::Header;
     use rocket::local::blocking::Client;
 
     use super::*;
     use crate::http::Method;
 
-    static ORIGIN: ::http::header::HeaderName = hyper::header::ORIGIN;
-    static ACCESS_CONTROL_REQUEST_METHOD: ::http::header::HeaderName =
-        hyper::header::ACCESS_CONTROL_REQUEST_METHOD;
-    static ACCESS_CONTROL_REQUEST_HEADERS: ::http::header::HeaderName =
-        hyper::header::ACCESS_CONTROL_REQUEST_HEADERS;
+    static ORIGIN: &str = "Origin";
+    static ACCESS_CONTROL_REQUEST_METHOD: &str = "Access-Control-Request-Method";
+    static ACCESS_CONTROL_REQUEST_HEADERS: &str = "Access-Control-Request-Headers";
 
     fn to_parsed_origin<S: AsRef<str>>(origin: S) -> Result<Origin, Error> {
         Origin::from_str(origin.as_ref())
@@ -2062,6 +1983,16 @@ mod tests {
     fn make_client() -> Client {
         let rocket = rocket::build();
         Client::tracked(rocket).expect("valid rocket instance")
+    }
+
+    #[test]
+    fn allowed_methods() {
+        let allowed_methods: AllowedMethods = ["GET", "POST", "DELETE"]
+            .iter()
+            .map(|s| FromStr::from_str(s).unwrap())
+            .collect();
+
+        assert!(allowed_methods.len() == 3);
     }
 
     // CORS options test
@@ -2552,7 +2483,7 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
     struct MethodTest {
-        method: crate::Method,
+        method: Method,
     }
 
     #[cfg(feature = "serialization")]
@@ -2583,12 +2514,12 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2614,12 +2545,12 @@ mod tests {
         let cors = options.to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.example.com");
+        let origin_header = Header::new(ORIGIN, "https://www.example.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2642,12 +2573,12 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.example.com");
+        let origin_header = Header::new(ORIGIN, "https://www.example.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2664,8 +2595,8 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2681,12 +2612,12 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::POST.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Post.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2703,13 +2634,13 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
         let request_headers = Header::new(
-            ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
+            ACCESS_CONTROL_REQUEST_HEADERS,
             "Authorization, X-NOT-ALLOWED",
         );
 
@@ -2727,7 +2658,7 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let request = client.get("/").header(origin_header);
 
         let result = validate(&cors, request.inner()).expect("to not fail");
@@ -2745,7 +2676,7 @@ mod tests {
         let cors = options.to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.example.com");
+        let origin_header = Header::new(ORIGIN, "https://www.example.com");
         let request = client.get("/").header(origin_header);
 
         let result = validate(&cors, request.inner()).expect("to not fail");
@@ -2762,7 +2693,7 @@ mod tests {
         let cors = make_cors_options().to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.example.com");
+        let origin_header = Header::new(ORIGIN, "https://www.example.com");
         let request = client.get("/").header(origin_header);
 
         let _ = validate(&cors, request.inner()).unwrap();
@@ -2785,12 +2716,12 @@ mod tests {
         let cors = options.to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2798,7 +2729,7 @@ mod tests {
             .header(method_header)
             .header(request_headers);
 
-        let response = validate_and_build(&cors, request.inner()).expect("to not fail");
+        let response = validate_and_build(&cors, request.inner()).unwrap();//.expect("to not fail");
 
         let expected_response = Response::new()
             .origin("https://www.acme.com", false)
@@ -2821,12 +2752,12 @@ mod tests {
 
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2857,12 +2788,12 @@ mod tests {
 
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let method_header = Header::new(
-            ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-            hyper::Method::GET.as_str(),
+            ACCESS_CONTROL_REQUEST_METHOD,
+            Method::Get.as_str(),
         );
-        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS.as_str(), "Authorization");
+        let request_headers = Header::new(ACCESS_CONTROL_REQUEST_HEADERS, "Authorization");
 
         let request = client
             .options("/")
@@ -2888,7 +2819,7 @@ mod tests {
         let cors = options.to_cors().expect("To not fail");
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let request = client.get("/").header(origin_header);
 
         let response = validate_and_build(&cors, request.inner()).expect("to not fail");
@@ -2910,7 +2841,7 @@ mod tests {
 
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let request = client.get("/").header(origin_header);
 
         let response = validate_and_build(&cors, request.inner()).expect("to not fail");
@@ -2932,7 +2863,7 @@ mod tests {
 
         let client = make_client();
 
-        let origin_header = Header::new(ORIGIN.as_str(), "https://www.acme.com");
+        let origin_header = Header::new(ORIGIN, "https://www.acme.com");
         let request = client.get("/").header(origin_header);
 
         let response = validate_and_build(&cors, request.inner()).expect("to not fail");

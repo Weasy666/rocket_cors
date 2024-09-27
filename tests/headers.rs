@@ -1,17 +1,14 @@
 //! This crate tests that all the request headers are parsed correctly in the round trip
 use std::ops::Deref;
 
-use rocket::http::hyper;
-use rocket::http::Header;
+use rocket::http::{Header, Method};
 use rocket::local::blocking::Client;
 use rocket::{get, routes};
 use rocket_cors::headers::*;
 
-static ORIGIN: http::header::HeaderName = hyper::header::ORIGIN;
-static ACCESS_CONTROL_REQUEST_METHOD: http::header::HeaderName =
-    hyper::header::ACCESS_CONTROL_REQUEST_METHOD;
-static ACCESS_CONTROL_REQUEST_HEADERS: http::header::HeaderName =
-    hyper::header::ACCESS_CONTROL_REQUEST_HEADERS;
+static ORIGIN: &str = "Origin";
+static ACCESS_CONTROL_REQUEST_METHOD: &str = "Access-Control-Request-Method";
+static ACCESS_CONTROL_REQUEST_HEADERS: &str = "Access-Control-Request-Headers";
 
 #[get("/request_headers")]
 fn request_headers(
@@ -35,13 +32,13 @@ fn request_headers_round_trip_smoke_test() {
     let rocket = rocket::build().mount("/", routes![request_headers]);
     let client = Client::tracked(rocket).expect("A valid Rocket client");
 
-    let origin_header = Header::new(ORIGIN.as_str(), "https://foo.bar.xyz");
+    let origin_header = Header::new(ORIGIN, "https://foo.bar.xyz");
     let method_header = Header::new(
-        ACCESS_CONTROL_REQUEST_METHOD.as_str(),
-        hyper::Method::GET.as_str(),
+        ACCESS_CONTROL_REQUEST_METHOD,
+        Method::Get.as_str(),
     );
     let request_headers = Header::new(
-        ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
+        ACCESS_CONTROL_REQUEST_HEADERS,
         "accept-language, X-Ping",
     );
     let req = client
